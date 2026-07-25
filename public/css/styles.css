@@ -1,0 +1,16 @@
+html {
+  scroll-behavior: smooth;
+}
+
+.prob-bar {
+  transition: width 0.6s ease;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
