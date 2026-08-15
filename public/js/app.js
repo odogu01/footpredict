@@ -187,167 +187,40 @@ function getDateFromFilter() {
     renderCurrentPage();
   });
 
-  function mockPrediction(homeTeam, awayTeam) {
-    const seed = homeTeam.split('').reduce((a, c) => a + c.charCodeAt(0), 0) +
-                 awayTeam.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  function showError(message) {
+    fixturesList.innerHTML = `<div class="text-center py-6 text-red-500">${message}</div>`;
+  }
 
-    function rng() {
-      let s = seed + arguments.length;
-      for (let i = 0; i < 5; i++) s = (s * 1103515245 + 12345) & 0x7fffffff;
-      return ((s % 1000) / 1000);
+  async function handlePredictClick(btn) {
+    const homeTeam = btn.dataset.home;
+    const awayTeam = btn.dataset.away;
+    const league = btn.dataset.league || '';
+    const matchDate = new Date().toISOString().split("T")[0];
+
+    btn.disabled = true;
+    btn.textContent = "Predicting...";
+    btn.classList.add("opacity-50", "cursor-not-allowed");
+
+    try {
+      const result = await predictMatch({ homeTeam, awayTeam, league, matchDate });
+      UI.resetResults();
+      UI.renderResults(result);
+      resultsSection.scrollIntoView({ behavior: "smooth", block: "center" });
+    } catch (err) {
+      UI.resetResults();
+      showError(`Prediction failed: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Predict";
+      btn.classList.remove("opacity-50", "cursor-not-allowed");
     }
-
-    function randomFrom(seedOffset) {
-      let s = seed + seedOffset;
-      for (let i = 0; i < 3; i++) s = (s * 1103515245 + 12345) & 0x7fffffff;
-      return ((s % 1000) / 1000);
-    }
-
-    const homePos = Math.floor(randomFrom(1) * 20) + 1;
-    const awayPos = Math.floor(randomFrom(2) * 20) + 1;
-
-    function generateForm(offset) {
-      const form = [];
-      for (let i = 0; i < 5; i++) {
-        const r = randomFrom(offset + i);
-        form.push(r < 0.45 ? 'W' : r < 0.72 ? 'D' : 'L');
-      }
-      return form;
-    }
-
-    function formPoints(form) {
-      return form.filter(r => r === 'W').length * 3 + form.filter(r => r === 'D').length;
-    }
-
-    function formGoalsFor(form) {
-      let total = 0;
-      form.forEach(r => {
-        if (r === 'W') total += 1 + Math.floor(randomFrom(100 + form.indexOf(r)) * 3);
-        else if (r === 'D') total += Math.floor(randomFrom(200 + form.indexOf(r)) * 2);
-        else total += Math.floor(randomFrom(300 + form.indexOf(r)) * 2);
-      });
-      return total;
-    }
-
-    function formGoalsAgainst(form) {
-      let total = 0;
-      form.forEach(r => {
-        if (r === 'L') total += 1 + Math.floor(randomFrom(400 + form.indexOf(r)) * 3);
-        else if (r === 'D') total += Math.floor(randomFrom(500 + form.indexOf(r)) * 2);
-        else total += Math.floor(randomFrom(600 + form.indexOf(r)) * 1);
-      });
-      return total;
-    }
-
-    const homeForm = generateForm(10);
-    const awayForm = generateForm(20);
-    const homePts = formPoints(homeForm);
-    const awayPts = formPoints(awayForm);
-    const homeGF = formGoalsFor(homeForm);
-    const homeGA = formGoalsAgainst(homeForm);
-    const awayGF = formGoalsFor(awayForm);
-    const awayGA = formGoalsAgainst(awayForm);
-
-    const h2hTotal = 4 + Math.floor(randomFrom(30) * 6);
-    const h2hHomeWins = Math.floor(h2hTotal * (0.3 + randomFrom(31) * 0.35));
-    const h2hDraws = Math.floor(h2hTotal * (0.15 + randomFrom(32) * 0.25));
-    const h2hAwayWins = h2hTotal - h2hHomeWins - h2hDraws;
-    const h2hHomeGoals = h2hHomeWins * 2 + h2hDraws * 1 + Math.floor(randomFrom(33) * h2hTotal);
-    const h2hAwayGoals = h2hAwayWins * 2 + h2hDraws * 1 + Math.floor(randomFrom(34) * h2hTotal);
-
-    let homeScore = 0, awayScore = 0;
-
-    // Recent form
-    homeScore += homePts * 0.12;
-    awayScore += awayPts * 0.12;
-
-    // Goal difference
-    const homeGD = homeGF - homeGA;
-    const awayGD = awayGF - awayGA;
-    homeScore += homeGD * 0.08;
-    awayScore += awayGD * 0.08;
-
-    // League position advantage
-    const posAdvantage = (awayPos - homePos) * 0.04;
-    homeScore += Math.max(posAdvantage, 0);
-    awayScore += Math.max(-posAdvantage, 0);
-
-    // Home advantage
-    homeScore += 0.6;
-
-    // Head-to-head
-    homeScore += (h2hHomeWins - h2hAwayWins) * 0.08;
-    if (h2hHomeGoals > h2hAwayGoals) homeScore += 0.2;
-    else awayScore += 0.2;
-
-    // Motivation: teams near top or bottom fight harder
-    if (homePos <= 4) homeScore += 0.4;
-    else if (homePos <= 6) homeScore += 0.2;
-    if (homePos >= 17) homeScore += 0.3;
-    if (awayPos <= 4) awayScore += 0.4;
-    else if (awayPos <= 6) awayScore += 0.2;
-    if (awayPos >= 17) awayScore += 0.3;
-
-    // Safety: ensure minimum scores
-    homeScore = Math.max(homeScore, 0.5);
-    awayScore = Math.max(awayScore, 0.5);
-
-    const total = homeScore + awayScore;
-    const rawHome = homeScore / total;
-    const rawAway = awayScore / total;
-
-    const drawBase = 0.24;
-    const drawFactor = 1 - Math.abs(rawHome - 0.5) * 1.6;
-    const drawProb = Math.round(Math.max(drawBase * Math.max(drawFactor, 0.25), 12));
-    const remaining = 100 - drawProb;
-    let homeProb = Math.round(remaining * rawHome);
-    let awayProb = remaining - homeProb;
-
-    // Normalize to exact 100
-    const diff = homeProb + awayProb + drawProb - 100;
-    if (diff !== 0) {
-      if (homeProb >= awayProb && homeProb >= drawProb) homeProb -= diff;
-      else if (awayProb >= homeProb && awayProb >= drawProb) awayProb -= diff;
-    }
-
-    const maxProb = Math.max(homeProb, drawProb, awayProb);
-    const prediction = maxProb === homeProb ? "Home Win" : maxProb === awayProb ? "Away Win" : "Draw";
-    let confidence = "Low";
-    if (maxProb > 68) confidence = "High";
-    else if (maxProb > 52) confidence = "Medium";
-
-    const factors = [
-      `Recent form: ${homeTeam} ${homePts}pts (${homeForm.join('-')}), ${awayTeam} ${awayPts}pts (${awayForm.join('-')})`,
-      `Goals in last 5: ${homeTeam} scored ${homeGF}, conceded ${homeGA} | ${awayTeam} scored ${awayGF}, conceded ${awayGA}`,
-      `Head-to-head: ${h2hHomeWins}W ${h2hDraws}D ${h2hAwayWins}L (${h2hHomeGoals}-${h2hAwayGoals} goals) in last ${h2hTotal} meetings`,
-      `League position: ${homeTeam} #${homePos} vs ${awayTeam} #${awayPos}` +
-        (homePos <= 4 ? ` — ${homeTeam} fighting for title/UCL spot` : homePos >= 17 ? ` — ${homeTeam} fighting relegation` : '') +
-        (awayPos <= 4 ? ` — ${awayTeam} fighting for title/UCL spot` : awayPos >= 17 ? ` — ${awayTeam} fighting relegation` : ''),
-      homeProb > awayProb
-        ? `${homeTeam} have home advantage and better overall stats in this matchup`
-        : `${awayTeam} are in strong form despite being away from home`
-    ];
-
-    return {
-      prediction,
-      probabilities: { home: homeProb, draw: drawProb, away: awayProb },
-      confidence,
-      factors: factors.slice(0, 4)
-    };
   }
 
   fixturesList.addEventListener("click", function (e) {
     const btn = e.target.closest(".predict-btn");
     if (!btn) return;
 
-    const homeTeam = btn.dataset.home;
-    const awayTeam = btn.dataset.away;
-
-    // Use mock prediction directly for ALL matches — instant, no form needed
-    const result = mockPrediction(homeTeam, awayTeam);
-    UI.resetResults();
-    UI.renderResults(result);
-    resultsSection.scrollIntoView({ behavior: "smooth", block: "center" });
+    handlePredictClick(btn);
   });
 
 })();

@@ -1,4 +1,62 @@
+const path = require('path');
+const fs = require('fs');
 const pool = require('../config/database');
+
+// Canonical feature order — MUST match the XGBoost training pipeline
+// (model-service/train_model.py) exactly. Never reorder without retraining.
+const FEATURE_NAMES = [
+  'elo_diff',
+  'home_pts_3',
+  'away_pts_3',
+  'home_gf_3',
+  'away_gf_3',
+  'home_ga_3',
+  'away_ga_3',
+  'home_pts_5',
+  'away_pts_5',
+  'home_pts_10',
+  'away_pts_10',
+  'h2h_home_win_ratio',
+  'h2h_matches',
+  'home_rest_days',
+  'away_rest_days',
+  'derby_flag'
+];
+
+// Known derbies (canonical team names, order-insensitive)
+const DERBY_PAIRS = [
+  ['Manchester United', 'Manchester City'],   // Manchester derby
+  ['Arsenal', 'Tottenham'],                    // North London derby
+  ['Liverpool', 'Everton'],                    // Merseyside derby
+  ['Real Madrid', 'Barcelona'],                // El Clasico
+  ['Real Madrid', 'Atletico Madrid'],          // Madrid derby
+  ['Sevilla', 'Real Betis'],                   // Seville derby
+  ['AC Milan', 'Inter Milan'],                 // Milan derby
+  ['Roma', 'Lazio'],                           // Rome derby
+  ['Juventus', 'Inter Milan'],                 // Derby d'Italia
+  ['Borussia Dortmund', 'Schalke 04'],         // Revierderby
+  ['Bayern Munich', 'Borussia Dortmund'],      // Der Klassiker
+  ['Paris Saint-Germain', 'Marseille']         // Le Classique
+];
+
+const MAPPING_PATH = path.join(__dirname, '..', '..', '..', 'model-service', 'src', 'team_mapping.json');
+let TEAM_MAPPING = {};
+try {
+  TEAM_MAPPING = JSON.parse(fs.readFileSync(MAPPING_PATH, 'utf8'));
+} catch (e) {
+  console.warn('team_mapping.json not loaded:', e.message);
+}
+
+function canonicalizeName(name) {
+  if (!name) return name;
+  return TEAM_MAPPING[name] || name;
+}
+
+function isDerby(homeName, awayName) {
+  return DERBY_PAIRS.some(([a, b]) =>
+    (homeName === a && awayName === b) || (homeName === b && awayName === a)
+  );
+}
 
 async function getTeamElo(teamId) {
   const [rows] = await pool.query(
@@ -52,16 +110,51 @@ async function getHeadToHead(homeId, awayId) {
   return { home_wins: 0, draws: 0, away_wins: 0, home_goals: 0, away_goals: 0, total_matches: 0 };
 }
 
+// Days of rest since the team's previous match (0 if none found)
+async function getRestDays(teamId, matchDate) {
+  const [rows] = await pool.query(
+    `SELECT DATEDIFF(?, MAX(match_date)) AS rest_days
+     FROM matches
+     WHERE (home_team_id = ? OR away_team_id = ?) AND match_date < ? AND status = 'played'`,
+    [matchDate, teamId, teamId, matchDate]
+  );
+  const rest = rows.length && rows[0].rest_days != null ? rows[0].rest_days : null;
+  return rest == null ? 14 : rest; // default: two weeks (no data)
+}
+
+async function getTeamNames(ids) {
+  if (!ids.length) return {};
+  const [rows] = await pool.query(
+    `SELECT id, name FROM teams WHERE id IN (${ids.map(() => '?').join(',')})`,
+    ids
+  );
+  const map = {};
+  rows.forEach(r => { map[r.id] = r.name; });
+  return map;
+}
+
 async function buildFeatureVector({ homeTeam, awayTeam, matchDate }) {
   const homeElo = await getTeamElo(homeTeam);
   const awayElo = await getTeamElo(awayTeam);
   const homeForm = await getRecentForm(homeTeam, matchDate);
   const awayForm = await getRecentForm(awayTeam, matchDate);
   const h2h = await getHeadToHead(homeTeam, awayTeam);
+  const homeRest = await getRestDays(homeTeam, matchDate);
+  const awayRest = await getRestDays(awayTeam, matchDate);
 
+  const names = await getTeamNames([homeTeam, awayTeam]);
+  const derbyFlag = isDerby(names[homeTeam], names[awayTeam]) ? 1 : 0;
+
+  return buildVector({
+    homeElo, awayElo, homeForm, awayForm, h2h, homeRest, awayRest, derbyFlag,
+    metadata: { homeTeam: names[homeTeam], awayTeam: names[awayTeam] }
+  });
+}
+
+// Pure computation shared by the live API and the training exporter
+function buildVector({ homeElo, awayElo, homeForm, awayForm, h2h, homeRest, awayRest, derbyFlag, metadata }) {
   const eloDiff = homeElo - awayElo;
   const h2hHomeWinsRatio = h2h.total_matches > 0 ? h2h.home_wins / h2h.total_matches : 0.5;
-  const homeAdvantage = 1;
 
   const featureVector = [
     eloDiff,
@@ -73,15 +166,40 @@ async function buildFeatureVector({ homeTeam, awayTeam, matchDate }) {
     awayForm.goalsAgainst3,
     homeForm.points5,
     awayForm.points5,
+    homeForm.points10,
+    awayForm.points10,
     h2hHomeWinsRatio,
     h2h.total_matches,
-    homeAdvantage
+    homeRest,
+    awayRest,
+    derbyFlag
   ];
 
   return {
     featureVector,
-    metadata: { homeElo, awayElo, homeForm, awayForm, h2h }
+    metadata: {
+      ...(metadata || {}),
+      homeElo,
+      awayElo,
+      homeForm,
+      awayForm,
+      h2h,
+      homeRest,
+      awayRest,
+      derbyFlag
+    }
   };
 }
 
-module.exports = { getTeamElo, getRecentForm, getHeadToHead, buildFeatureVector };
+module.exports = {
+  FEATURE_NAMES,
+  canonicalizeName,
+  isDerby,
+  getTeamElo,
+  getRecentForm,
+  getHeadToHead,
+  getRestDays,
+  getTeamNames,
+  buildFeatureVector,
+  buildVector
+};

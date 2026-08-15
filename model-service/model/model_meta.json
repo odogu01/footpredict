@@ -1,0 +1,37 @@
+{
+  "classes": [
+    "H",
+    "D",
+    "A"
+  ],
+  "feature_names": [
+    "elo_diff",
+    "home_pts_3",
+    "away_pts_3",
+    "home_gf_3",
+    "away_gf_3",
+    "home_ga_3",
+    "away_ga_3",
+    "home_pts_5",
+    "away_pts_5",
+    "home_pts_10",
+    "away_pts_10",
+    "h2h_home_win_ratio",
+    "h2h_matches",
+    "home_rest_days",
+    "away_rest_days",
+    "derby_flag"
+  ],
+  "n_features": 16,
+  "metrics": {
+    "accuracy": 52.23,
+    "precision": 42.56,
+    "recall": 45.11,
+    "f1": 43.8
+  },
+  "trained_at": "2026-08-16",
+  "holdout_start": "2025-08-01",
+  "train_samples": 7156,
+  "test_samples": 1752,
+  "best_iteration": 20
+}

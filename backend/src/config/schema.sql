@@ -84,3 +84,16 @@ CREATE TABLE IF NOT EXISTS elo_history (
   FOREIGN KEY (team_id) REFERENCES teams(id),
   UNIQUE KEY uk_team_date (team_id, match_date)
 );
+
+-- Model metrics: single row, computed during the seed/backtest pass
+CREATE TABLE IF NOT EXISTS model_stats (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  accuracy DECIMAL(5,2) DEFAULT 0,
+  model_precision DECIMAL(5,2) DEFAULT 0,
+  recall DECIMAL(5,2) DEFAULT 0,
+  f1 DECIMAL(5,2) DEFAULT 0,
+  evaluated_matches INT DEFAULT 0,
+  features_used INT DEFAULT 0,
+  model_version VARCHAR(50) DEFAULT '',
+  trained_at DATE NULL
+);

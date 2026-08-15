@@ -401,6 +401,132 @@ async function bootstrapSchema() {
 }
 
 // ---------------------------------------------------------------------------
+// Backtest: measure Elo model accuracy over all historical matches
+// ---------------------------------------------------------------------------
+
+function eloExpected(eloDiff) {
+  return 1 / (1 + Math.pow(10, -eloDiff / 400));
+}
+
+async function runBacktest() {
+  // Load all elo_history snapshots: teamId -> sorted [{date, rating}]
+  const [historyRows] = await pool.query(
+    `SELECT team_id, DATE_FORMAT(match_date, '%Y-%m-%d') AS d, elo_rating
+     FROM elo_history ORDER BY match_date`
+  );
+  const history = new Map();
+  for (const r of historyRows) {
+    if (!history.has(r.team_id)) history.set(r.team_id, []);
+    history.get(r.team_id).push({ d: r.d, rating: r.elo_rating });
+  }
+
+  // Pre-match rating = latest snapshot strictly before the match date
+  function ratingBefore(teamId, matchDate) {
+    const snapshots = history.get(teamId);
+    if (!snapshots || snapshots.length === 0) return 1500;
+    let lo = 0, hi = snapshots.length - 1, best = null;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (snapshots[mid].d < matchDate) { best = snapshots[mid]; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return best ? best.rating : 1500;
+  }
+
+  const [matches] = await pool.query(
+    `SELECT home_team_id, away_team_id, home_score, away_score,
+            DATE_FORMAT(match_date, '%Y-%m-%d') AS match_date
+     FROM matches WHERE status = 'played' ORDER BY match_date, id`
+  );
+
+  // Confusion matrix: rows=actual (H,D,A), cols=predicted (H,D,A)
+  const cm = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const idxOf = { H: 0, D: 1, A: 2 };
+
+  for (const m of matches) {
+    const homeElo = ratingBefore(m.home_team_id, m.match_date);
+    const awayElo = ratingBefore(m.away_team_id, m.match_date);
+
+    // Same decision logic as the Elo fallback in modelService.js
+    const expected = eloExpected(homeElo - awayElo + HOME_ADVANTAGE);
+    const drawBase = 0.26;
+    const drawFactor = 1 - Math.abs(expected - 0.5);
+    const drawProb = Math.round(drawBase * drawFactor * 100);
+    const remaining = 100 - drawProb;
+    let homeProb = Math.round(remaining * expected);
+    let awayProb = remaining - homeProb;
+    const diff = homeProb + awayProb + drawProb - 100;
+    if (diff !== 0) {
+      const maxIdx = homeProb >= awayProb && homeProb >= drawProb ? 'home'
+                   : awayProb >= homeProb && awayProb >= drawProb ? 'away'
+                   : 'draw';
+      if (maxIdx === 'home') homeProb -= diff;
+      else if (maxIdx === 'away') awayProb -= diff;
+      else drawProb -= diff;
+    }
+    const predicted = homeProb >= awayProb && homeProb >= drawProb ? 'H'
+                    : awayProb >= homeProb && awayProb >= drawProb ? 'A'
+                    : 'D';
+
+    const actual = m.home_score > m.away_score ? 'H' : m.home_score < m.away_score ? 'A' : 'D';
+    cm[idxOf[actual]][idxOf[predicted]]++;
+  }
+
+  const total = matches.length;
+  const correct = cm[0][0] + cm[1][1] + cm[2][2];
+  const accuracy = total ? (correct / total) * 100 : 0;
+
+  // Macro precision / recall / F1
+  const precisions = [], recalls = [];
+  for (let i = 0; i < 3; i++) {
+    const tp = cm[i][i];
+    const fp = cm[0][i] + cm[1][i] + cm[2][i] - tp;
+    const fn = cm[i][0] + cm[i][1] + cm[i][2] - tp;
+    precisions.push(tp + fp > 0 ? tp / (tp + fp) : 0);
+    recalls.push(tp + fn > 0 ? tp / (tp + fn) : 0);
+  }
+  const precision = (precisions.reduce((a, b) => a + b, 0) / 3) * 100;
+  const recall = (recalls.reduce((a, b) => a + b, 0) / 3) * 100;
+  const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+
+  console.log(`Backtest: ${total} matches, accuracy ${accuracy.toFixed(2)}%, precision ${precision.toFixed(2)}%, recall ${recall.toFixed(2)}%, F1 ${f1.toFixed(2)}%`);
+
+  // If a trained XGBoost model exists, prefer its holdout metrics (production model)
+  const modelMetaPath = path.join(__dirname, '..', '..', '..', 'model-service', 'model', 'model_meta.json');
+  let accuracyOut = accuracy.toFixed(2);
+  let precisionOut = precision.toFixed(2);
+  let recallOut = recall.toFixed(2);
+  let f1Out = f1.toFixed(2);
+  let evaluatedOut = total;
+  let version = 'elo-v1';
+  let trainedAt = new Date().toISOString().split('T')[0];
+
+  try {
+    if (fs.existsSync(modelMetaPath)) {
+      const meta = JSON.parse(fs.readFileSync(modelMetaPath, 'utf8'));
+      if (meta.metrics) {
+        accuracyOut = meta.metrics.accuracy;
+        precisionOut = meta.metrics.precision;
+        recallOut = meta.metrics.recall;
+        f1Out = meta.metrics.f1;
+        evaluatedOut = meta.test_samples || total;
+        version = 'xgboost-v1';
+        trainedAt = meta.trained_at;
+        console.log(`Using XGBoost holdout metrics (${evaluatedOut} test matches)`);
+      }
+    }
+  } catch (e) {
+    console.warn('Could not read model_meta.json, keeping Elo backtest:', e.message);
+  }
+
+  await pool.query(
+    `REPLACE INTO model_stats (id, accuracy, model_precision, recall, f1, evaluated_matches, features_used, model_version, trained_at)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [accuracyOut, precisionOut, recallOut, f1Out, evaluatedOut, 16, version, trainedAt]
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -435,6 +561,9 @@ async function main() {
 
   console.log('=== Rebuilding head-to-head ===');
   await runH2hPass();
+
+  console.log('=== Backtesting Elo model ===');
+  await runBacktest();
 
   await pool.end();
   console.log('Pipeline complete.');

@@ -1,12 +1,11 @@
-import os
 import json
 import logging
-from datetime import datetime, date
+import os
 
-from flask import Flask, request, jsonify
+import numpy as np
+import xgboost as xgb
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-
-from football_data_service import fetch_matches as fetch_fd_matches
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,187 +13,122 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-MAPPING_PATH = os.path.join(os.path.dirname(__file__), 'team_mapping.json')
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(HERE, "..", "model", "model.json")
+META_PATH = os.path.join(HERE, "..", "model", "model_meta.json")
 
-try:
-    with open(MAPPING_PATH, 'r', encoding='utf-8') as f:
-        TEAM_MAPPING = json.load(f)
-    logger.info(f"Loaded {len(TEAM_MAPPING)} team name mappings")
-except Exception as e:
-    logger.warning(f"Could not load team_mapping.json: {e}")
-    TEAM_MAPPING = {}
+CLASSES = ["H", "D", "A"]
+CONFIDENCE_NAMES = {0: "Low", 1: "Medium", 2: "High"}
+CONFIDENCE_THRESHOLDS = [55, 70]  # max prob thresholds for Low/Medium/High
 
-
-def normalize_team_name(raw_name):
-    canonical = TEAM_MAPPING.get(raw_name)
-    if canonical:
-        return {"name": canonical, "requires_mapping": False}
-    return {"name": raw_name, "requires_mapping": True}
+bst = None
+meta = {}
 
 
-def parse_date_param(date_str):
-    if not date_str:
-        return date.today()
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        raise ValueError(f"Invalid date format: {date_str}. Use YYYY-MM-DD.")
+def load_model():
+    global bst, meta
+    if not os.path.isfile(MODEL_PATH):
+        logger.warning("Model file not found at %s", MODEL_PATH)
+        return
+    bst = xgb.Booster()
+    bst.load_model(MODEL_PATH)
+    if os.path.isfile(META_PATH):
+        with open(META_PATH, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    logger.info("Loaded XGBoost model (features=%s, trained=%s)",
+                meta.get("n_features", "?"), meta.get("trained_at", "?"))
 
 
-def normalize_livescore_match(m):
-    """Normalize a single livescore-api match dict into our standard format."""
-    home = normalize_team_name(m.get("Home", ""))
-    away = normalize_team_name(m.get("Away", ""))
-    league = m.get("League", "")
-    country = m.get("Country", "")
-    raw_kickoff = m.get("Kickoff", "")
-    status = m.get("Status", "NS")
-
-    # Parse actual match date/time from YYYYMMDDHHMMSS
-    kickoff_str = str(raw_kickoff)
-    kickoff = ""
-    if len(kickoff_str) >= 14:
-        kickoff = f"{kickoff_str[:4]}-{kickoff_str[4:6]}-{kickoff_str[6:8]} {kickoff_str[8:10]}:{kickoff_str[10:12]}"
-    elif len(kickoff_str) >= 12:
-        kickoff = f"{kickoff_str[:4]}-{kickoff_str[4:6]}-{kickoff_str[6:8]} {kickoff_str[8:10]}:{kickoff_str[10:12]}"
-
-    # Build a display league name combining country + league
-    display_league = str(league)
-    country_str = str(country)
-    if country_str and country_str not in display_league:
-        if "World Cup" in country_str or "Cup" in country_str or "Champions" in country_str:
-            display_league = country_str
-
-    return {
-        "home_team": home["name"],
-        "away_team": away["name"],
-        "league": display_league,
-        "kickoff": kickoff,
-        "status": status,
-        "home_score": m.get("H Scores"),
-        "away_score": m.get("A Scores"),
-        "home_requires_mapping": home["requires_mapping"],
-        "away_requires_mapping": away["requires_mapping"],
-        "source": "livescore-api"
-    }
-
-
-def deduplicate_matches(matches):
-    """Remove duplicates by (home_team, away_team) — keep first occurrence (higher priority)."""
-    seen = set()
-    unique = []
-    for m in matches:
-        key = (m.get("home_team", "").lower().strip(), m.get("away_team", "").lower().strip())
-        if key not in seen and key[0] and key[1]:
-            seen.add(key)
-            unique.append(m)
-    return unique
-
-
-@app.route("/fixtures", methods=["GET"])
-def get_fixtures():
-    date_param = request.args.get("date", "")
-    competition = request.args.get("competition", "").strip()
-    try:
-        match_date = parse_date_param(date_param)
-    except ValueError as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-
-    date_str = match_date.isoformat()
-    date_prefix = match_date.strftime("%Y%m%d")
-
-    all_normalized = []
-
-    # --- SOURCE 1: football-data.org ---
-    # Only when a specific competition is selected and we have a mapping
-    if competition:
-        try:
-            fd_matches = fetch_fd_matches(competition, date_param, date_prefix)
-            all_normalized.extend(fd_matches)
-            if fd_matches:
-                logger.info(f"Got {len(fd_matches)} matches from football-data.org for {competition}")
-        except Exception as e:
-            logger.warning(f"football-data.org error: {e}")
-
-    # --- SOURCE 2: livescore-api ---
-    try:
-        from livescore_api import livescore
-        client = livescore()
-        raw_matches = client.matches()
-        logger.info(f"livescore-api: fetched {len(raw_matches)} matches")
-    except ImportError as e:
-        logger.error(f"livescore-api import failed: {e}")
-        raw_matches = []
-    except Exception as e:
-        logger.warning(f"livescore-api error: {e}")
-        raw_matches = []
-
-    if raw_matches:
-        if competition:
-            comp_lower = competition.lower()
-            ls_filtered = [
-                m for m in raw_matches if isinstance(m, dict)
-                and (comp_lower in str(m.get("League", "")).lower()
-                     or comp_lower in str(m.get("Country", "")).lower())
-            ]
-        else:
-            ls_filtered = [
-                m for m in raw_matches if isinstance(m, dict)
-                and str(m.get("Kickoff", "")).startswith(date_prefix)
-            ]
-
-        for m in ls_filtered:
-            try:
-                all_normalized.append(normalize_livescore_match(m))
-            except Exception as e:
-                logger.warning(f"Skipping malformed livescore match: {e}")
-                continue
-
-    # Merge: deduplicate (football-data.org entries come first = higher priority)
-    merged = deduplicate_matches(all_normalized)
-
-    message = ""
-    if not merged:
-        if competition:
-            message = f"No matches found for {competition}"
-        else:
-            message = "No matches scheduled for this date"
-
-    return jsonify({
-        "success": True,
-        "date": date_str,
-        "matches": merged,
-        "message": message
-    })
+load_model()
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "footpredict-model"})
+    return jsonify({"status": "ok", "service": "footpredict-model",
+                    "model_loaded": bst is not None,
+                    "model_version": meta.get("trained_at", "none")})
+
+
+def _confidence(max_prob):
+    if max_prob >= CONFIDENCE_THRESHOLDS[1]:
+        return "High"
+    if max_prob >= CONFIDENCE_THRESHOLDS[0]:
+        return "Medium"
+    return "Low"
+
+
+def _key_factors(probs, feature_names, features):
+    """Human-readable rationale using the most influential features."""
+    if not feature_names or len(feature_names) != len(features):
+        return ["Prediction generated by XGBoost model"]
+    fmap = dict(zip(feature_names, features))
+    factors = []
+    elo_diff = fmap.get("elo_diff", 0)
+    if abs(elo_diff) >= 50:
+        factors.append(
+            f"Elo rating gap of {abs(elo_diff):.0f} points "
+            f"({'favoring the home side' if elo_diff > 0 else 'favoring the away side'})")
+    rest_diff = fmap.get("home_rest_days", 0) - fmap.get("away_rest_days", 0)
+    if abs(rest_diff) >= 3:
+        factors.append(
+            f"Rest advantage of {abs(rest_diff):.0f} days "
+            f"({'for the home team' if rest_diff > 0 else 'for the away team'})")
+    if fmap.get("derby_flag", 0) == 1:
+        factors.append("Local derby — form often takes a back seat")
+    if fmap.get("h2h_matches", 0) >= 4:
+        factors.append(
+            f"{fmap.get('h2h_matches', 0):.0f} head-to-head meetings in the last 3 seasons "
+            f"considered (home win ratio {fmap.get('h2h_home_win_ratio', 0):.0%})")
+    if not factors:
+        factors.append("Balanced model inputs across Elo, form, H2H and rest")
+    return factors
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    if bst is None:
+        return jsonify({"success": False, "message": "Model not loaded"}), 503
+
     body = request.get_json(silent=True) or {}
     features = body.get("features", [])
     if not features:
         return jsonify({"success": False, "message": "No features provided"}), 400
+
+    try:
+        dmatrix = xgb.DMatrix(np.array([features], dtype=np.float32))
+        probs = bst.predict(dmatrix)[0]
+    except Exception as e:
+        logger.exception("Prediction failed")
+        return jsonify({"success": False, "message": f"Prediction failed: {e}"}), 500
+
+    probs_pct = (probs * 100).round().astype(int)
+    pred_idx = int(np.argmax(probs_pct))
+
+    # Normalize so probabilities sum to exactly 100
+    diff = int(probs_pct.sum()) - 100
+    if diff != 0:
+        probs_pct[pred_idx] -= diff
+
     return jsonify({
         "success": True,
-        "predictedOutcome": "H",
-        "probabilities": {"home": 60, "draw": 25, "away": 15},
-        "confidence": "Medium",
-        "keyFactors": ["XGBoost model not yet trained - returning default"]
+        "predictedOutcome": CLASSES[pred_idx],
+        "probabilities": {
+            "home": int(probs_pct[0]),
+            "draw": int(probs_pct[1]),
+            "away": int(probs_pct[2])
+        },
+        "confidence": _confidence(int(probs_pct[pred_idx])),
+        "keyFactors": _key_factors(probs_pct, meta.get("feature_names", []), features),
+        "modelVersion": meta.get("trained_at", "unknown")
     })
 
 
 if __name__ == "__main__":
-    # Read PORT from .env as fallback
     port_env = os.environ.get("PORT", "")
     if not port_env:
-        env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+        env_path = os.path.join(HERE, "..", ".env")
         if os.path.isfile(env_path):
-            with open(env_path, 'r') as f:
+            with open(env_path, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("PORT="):

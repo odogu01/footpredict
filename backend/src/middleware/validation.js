@@ -1,30 +1,23 @@
-const VALID_LEAGUES = [
-  'English Premier League',
-  'Spanish La Liga',
-  'Italian Serie A',
-  'German Bundesliga',
-  'French Ligue 1'
-];
-
 function validatePrediction(req, res, next) {
   const { homeTeam, awayTeam, league, matchDate } = req.body;
   const errors = [];
 
-  if (!homeTeam || typeof homeTeam !== 'number') {
-    errors.push('homeTeam is required and must be a numeric ID');
+  const isId = v => typeof v === 'number';
+  const isName = v => typeof v === 'string' && v.trim().length > 0;
+
+  if (!homeTeam || !(isId(homeTeam) || isName(homeTeam))) {
+    errors.push('homeTeam is required (numeric ID or team name)');
   }
-  if (!awayTeam || typeof awayTeam !== 'number') {
-    errors.push('awayTeam is required and must be a numeric ID');
+  if (!awayTeam || !(isId(awayTeam) || isName(awayTeam))) {
+    errors.push('awayTeam is required (numeric ID or team name)');
   }
-  if (homeTeam && awayTeam && homeTeam === awayTeam) {
+  if (homeTeam && awayTeam && String(homeTeam) === String(awayTeam)) {
     errors.push('homeTeam and awayTeam must be different');
   }
-  if (!league || !VALID_LEAGUES.includes(league)) {
-    errors.push(`league must be one of: ${VALID_LEAGUES.join(', ')}`);
+  if (league && typeof league !== 'string') {
+    errors.push('league must be a string');
   }
-  if (!matchDate) {
-    errors.push('matchDate is required (YYYY-MM-DD)');
-  } else if (isNaN(Date.parse(matchDate))) {
+  if (matchDate && isNaN(Date.parse(matchDate))) {
     errors.push('matchDate must be a valid date in YYYY-MM-DD format');
   }
 
