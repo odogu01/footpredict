@@ -1,6 +1,6 @@
-// Relative path — works on Vercel (same domain) and with local dev servers.
-// For local file:// development, use: npx serve public/
-const API_BASE = '/api';
+// Backend API hosted on Render (Express + MySQL/TiDB).
+// For local development, change this to your local backend URL.
+const API_BASE = 'https://footpredict-dt5p.onrender.com/api';
 
 async function fetchFixtures({ date, competition } = {}) {
   const params = [];

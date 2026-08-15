@@ -2,6 +2,9 @@
 node_modules/
 backend/node_modules/
 
+# Downloaded dataset (football-data.co.uk CSVs)
+backend/data/
+
 # Python
 __pycache__/
 *.pyc
