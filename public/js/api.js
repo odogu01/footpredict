@@ -17,6 +17,21 @@ async function fetchFixtures({ date, competition } = {}) {
   return res.json();
 }
 
+async function fetchLeagues() {
+  const res = await fetch(`${API_BASE}/teams/leagues`);
+  if (!res.ok) throw new Error('Failed to fetch leagues');
+  return res.json();
+}
+
+async function fetchTeams({ league } = {}) {
+  const params = [];
+  if (league) params.push(`league=${encodeURIComponent(league)}`);
+  const qs = params.length ? '?' + params.join('&') : '';
+  const res = await fetch(`${API_BASE}/teams${qs}`);
+  if (!res.ok) throw new Error('Failed to fetch teams');
+  return res.json();
+}
+
 async function predictMatch({ homeTeam, awayTeam, league, matchDate }) {
   const res = await fetch(`${API_BASE}/predict`, {
     method: 'POST',

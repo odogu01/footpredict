@@ -6,7 +6,9 @@ async function getTeams(req, res, next) {
 
     if (!league) {
       const [rows] = await pool.query(
-        'SELECT t.id, t.name, l.name AS league FROM teams t JOIN leagues l ON t.league_id = l.id'
+        `SELECT t.id, t.name, t.elo_rating, l.name AS league
+         FROM teams t JOIN leagues l ON t.league_id = l.id
+         ORDER BY t.elo_rating DESC`
       );
       return res.json({ success: true, data: rows });
     }
@@ -17,7 +19,7 @@ async function getTeams(req, res, next) {
     }
 
     const [teams] = await pool.query(
-      'SELECT id, name FROM teams WHERE league_id = ? ORDER BY name',
+      `SELECT id, name, elo_rating FROM teams WHERE league_id = ? ORDER BY elo_rating DESC`,
       [leagueRows[0].id]
     );
     res.json({ success: true, data: teams });

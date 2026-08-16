@@ -223,4 +223,108 @@ function getDateFromFilter() {
     handlePredictClick(btn);
   });
 
+  // ------------------------------------------------------------------
+  // Teams view
+  // ------------------------------------------------------------------
+  const predictView = document.getElementById("predictView");
+  const teamsView = document.getElementById("teamsView");
+  const navPredict = document.getElementById("navPredict");
+  const navTeams = document.getElementById("navTeams");
+  const teamsLeagueSelect = document.getElementById("teamsLeagueSelect");
+  const loadTeamsBtn = document.getElementById("loadTeamsBtn");
+  const teamsSpinner = document.getElementById("teamsSpinner");
+  const teamsEmpty = document.getElementById("teamsEmpty");
+  const teamsList = document.getElementById("teamsList");
+
+  // Populate league filter from the backend (real league names)
+  (async function populateLeagueFilter() {
+    try {
+      const data = await fetchLeagues();
+      (data.data || []).forEach(l => {
+        const opt = document.createElement("option");
+        opt.value = l.name;
+        opt.textContent = l.name;
+        teamsLeagueSelect.appendChild(opt);
+      });
+    } catch (err) {
+      // fall back to known league names if the API is unreachable
+      ["English Premier League", "Spanish La Liga", "Italian Serie A", "German Bundesliga", "French Ligue 1"].forEach(name => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        teamsLeagueSelect.appendChild(opt);
+      });
+    }
+  })();
+
+  const NAV_ACTIVE = ["text-indigo-600", "border-b-2", "border-indigo-600"];
+  const NAV_INACTIVE = ["hover:text-slate-800"];
+
+  function setNav(active) {
+    [navPredict, navTeams].forEach(n => {
+      n.classList.remove(...NAV_ACTIVE, ...NAV_INACTIVE);
+      n.classList.add(...NAV_INACTIVE);
+    });
+    const el = active === "predict" ? navPredict : navTeams;
+    el.classList.remove(...NAV_INACTIVE);
+    el.classList.add(...NAV_ACTIVE);
+  }
+
+  function showView(view) {
+    const isPredict = view === "predict";
+    predictView.classList.toggle("hidden", !isPredict);
+    teamsView.classList.toggle("hidden", isPredict);
+    UI.resetResults();
+    setNav(view);
+    window.scrollTo({ top: 0 });
+  }
+
+  navPredict.addEventListener("click", e => { e.preventDefault(); showView("predict"); });
+  navTeams.addEventListener("click", e => { e.preventDefault(); showView("teams"); });
+
+  function eloBadgeClass(elo) {
+    if (elo >= 1700) return "bg-green-100 text-green-800";
+    if (elo >= 1550) return "bg-blue-100 text-blue-800";
+    if (elo >= 1450) return "bg-yellow-100 text-yellow-800";
+    return "bg-red-100 text-red-700";
+  }
+
+  async function loadTeams() {
+    const league = teamsLeagueSelect.value;
+    teamsList.innerHTML = "";
+    teamsEmpty.classList.add("hidden");
+    teamsSpinner.classList.remove("hidden");
+
+    try {
+      const data = await fetchTeams({ league: league || undefined });
+      const teams = data.data || [];
+
+      if (teams.length === 0) {
+        teamsEmpty.classList.remove("hidden");
+        teamsEmpty.innerHTML = `<p class="text-lg">&#128680; No teams found.</p>`;
+        return;
+      }
+
+      let html = '<div class="divide-y divide-slate-100">';
+      teams.forEach((t, i) => {
+        const eloColor = eloBadgeClass(t.elo_rating);
+        html += `
+          <div class="flex items-center gap-3 py-3 px-1 hover:bg-slate-50 rounded-lg transition-colors duration-150">
+            <span class="w-8 text-right text-sm font-semibold text-slate-400">${i + 1}</span>
+            <span class="flex-1 text-sm font-medium text-slate-800">${t.name}</span>
+            ${t.league ? `<span class="text-xs text-slate-400 hidden sm:inline">${t.league}</span>` : ""}
+            <span class="inline-block px-2 py-0.5 rounded text-xs font-bold ${eloColor} min-w-[64px] text-center">${t.elo_rating}</span>
+          </div>`;
+      });
+      html += '</div>';
+      teamsList.innerHTML = html;
+    } catch (err) {
+      teamsList.innerHTML = `<div class="text-center py-6 text-red-500">${err.message}</div>`;
+    } finally {
+      teamsSpinner.classList.add("hidden");
+    }
+  }
+
+  loadTeamsBtn.addEventListener("click", loadTeams);
+
 })();
