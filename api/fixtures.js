@@ -93,8 +93,10 @@ function normalizeMatch(raw) {
 const CACHE = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-async function fetchCompetition(code) {
-  const cacheKey = `comp_${code}`;
+async function fetchCompetition(code, dateFrom = null, dateTo = null) {
+  // Cache key includes the date window so date-filtered requests
+  // never reuse an unfiltered (or differently filtered) response.
+  const cacheKey = `comp_${code}_${dateFrom || ''}_${dateTo || ''}`;
   const cached = CACHE.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL) {
     return cached.data;
@@ -106,7 +108,12 @@ async function fetchCompetition(code) {
     return null;
   }
 
-  const url = `${API_BASE}/competitions/${code}/matches`;
+  const params = new URLSearchParams();
+  if (dateFrom) params.set('dateFrom', dateFrom);
+  if (dateTo) params.set('dateTo', dateTo);
+  const qs = params.toString();
+
+  const url = `${API_BASE}/competitions/${code}/matches${qs ? `?${qs}` : ''}`;
   const res = await fetch(url, { headers: { 'X-Auth-Token': key } });
 
   if (!res.ok) {
@@ -129,7 +136,7 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const { competition } = req.query;
+  const { competition, date } = req.query;
   const compLower = (competition || '').toLowerCase().trim();
   const code = COMPETITION_CODES[compLower];
 
@@ -144,8 +151,23 @@ export default async function handler(req, res) {
     });
   }
 
+  // Validate the date filter (YYYY-MM-DD). When provided, only matches
+  // kicking off on that exact UTC day are returned.
+  let dateFilter = '';
+  if (date) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(200).json({
+        success: true,
+        date: new Date().toISOString().split('T')[0],
+        matches: [],
+        message: `Invalid date "${date}" — expected YYYY-MM-DD`,
+      });
+    }
+    dateFilter = date;
+  }
+
   try {
-    const raw = await fetchCompetition(code);
+    const raw = await fetchCompetition(code, dateFilter || null, dateFilter || null);
     if (!raw) {
       return res.status(200).json({
         success: true,
@@ -157,13 +179,18 @@ export default async function handler(req, res) {
 
     const matches = raw
       .map(normalizeMatch)
-      .filter(Boolean);
+      .filter(Boolean)
+      // Safety net: keep only matches on the requested day (defense in
+      // depth on top of the API's dateFrom/dateTo window).
+      .filter(m => !dateFilter || (m.kickoff && m.kickoff.startsWith(dateFilter)));
 
     return res.status(200).json({
       success: true,
-      date: new Date().toISOString().split('T')[0],
+      date: dateFilter || new Date().toISOString().split('T')[0],
       matches,
-      message: matches.length === 0 ? `No matches found for ${competition}` : '',
+      message: matches.length === 0
+        ? (dateFilter ? `No ${competition} matches on ${dateFilter}` : `No matches found for ${competition}`)
+        : '',
     });
   } catch (err) {
     console.error('fixtures error:', err);
